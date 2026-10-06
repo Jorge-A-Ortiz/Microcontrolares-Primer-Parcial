@@ -1,0 +1,16 @@
+{
+  "version": "25.3",
+  "toolchainPath": "C:/NXP/MCUXpressoIDE_25.6.136/ide/tools",
+  "linkedProjects": [],
+  "trustZoneType": "none",
+  "multicoreType": "none",
+  "projectType": "sdk-v2-freestanding",
+  "projectName": "Microcontrolares Primer Parcial",
+  "sdk": {
+    "version": "26.9.0",
+    "path": "${userHome}/Documents/Jorge/MCXA156/PrimerParcial/sdks/Microcontrolares Primer Parcial_sdk",
+    "boardId": "frdmmcxa156",
+    "deviceId": "MCXA156",
+    "coreId": "cm33_core0"
+  }
+}

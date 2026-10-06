@@ -1,0 +1,21 @@
+# MCUXpresso SDK junction (no versionar el SDK)
+__repo__
+__repo__/
+
+# Directorios de compilacion
+build/
+debug/
+
+# Ejecutables y archivos objeto
+*.bin
+*.elf
+*.hex
+*.axf
+*.map
+*.o
+*.obj
+*.su
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
