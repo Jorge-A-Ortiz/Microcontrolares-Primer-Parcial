@@ -10,7 +10,7 @@
       "hidden": true,
       "environment": {
         "ARMGCC_DIR": "C:/NXP/MCUXpressoIDE_25.6.136/ide/tools",
-        "SdkRootDirPath": "c:/Users/jorge/Documents/Jorge/MCXA156/PrimerParcial/sdks/Microcontrolares Primer Parcial_sdk",
+        "SdkRootDirPath": "c:/Users/jorge/Documents/Jorge/MCXA156/PrimerParcial/sdks/sdk_mcxa156",
         "MCUX_VENV_PATH": "C:/Users/jorge/.mcuxpressotools/.mcux-venv-3.12/Scripts",
         "PATH": "$env{MCUX_VENV_PATH}${pathListSep}$penv{PATH}"
       },
@@ -22,7 +22,7 @@
       "hidden": true,
       "environment": {
         "ARMGCC_DIR": "C:/NXP/MCUXpressoIDE_25.6.136/ide/tools",
-        "SdkRootDirPath": "c:/Users/jorge/Documents/Jorge/MCXA156/PrimerParcial/sdks/Microcontrolares Primer Parcial_sdk",
+        "SdkRootDirPath": "c:/Users/jorge/Documents/Jorge/MCXA156/PrimerParcial/sdks/sdk_mcxa156",
         "MCUX_VENV_PATH": "C:/Users/jorge/.mcuxpressotools/.mcux-venv-3.12/Scripts",
         "PATH": "$env{MCUX_VENV_PATH}${pathListSep}$penv{PATH}"
       },

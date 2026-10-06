@@ -58,46 +58,107 @@ BOARD_InitPins:
  * END ****************************************************************************************************************/
 void BOARD_InitPins(void)
 {
-    /* GPIO3: Peripheral clock is enabled */
+    /* Habilitar relojes para perifericos GPIO, PORT y LPUART */
+    CLOCK_EnableClock(kCLOCK_GateGPIO0);
+    CLOCK_EnableClock(kCLOCK_GateGPIO1);
     CLOCK_EnableClock(kCLOCK_GateGPIO3);
-    /* PORT3: Peripheral clock is enabled */
+    CLOCK_EnableClock(kCLOCK_GatePORT0);
+    CLOCK_EnableClock(kCLOCK_GatePORT1);
     CLOCK_EnableClock(kCLOCK_GatePORT3);
-    /* GPIO3 peripheral is released from reset */
+
+    /* Liberar perifericos de Reset */
+    RESET_ReleasePeripheralReset(kGPIO0_RST_SHIFT_RSTn);
+    RESET_ReleasePeripheralReset(kGPIO1_RST_SHIFT_RSTn);
     RESET_ReleasePeripheralReset(kGPIO3_RST_SHIFT_RSTn);
-    /* PORT3 peripheral is released from reset */
+    RESET_ReleasePeripheralReset(kPORT0_RST_SHIFT_RSTn);
+    RESET_ReleasePeripheralReset(kPORT1_RST_SHIFT_RSTn);
     RESET_ReleasePeripheralReset(kPORT3_RST_SHIFT_RSTn);
+    RESET_ReleasePeripheralReset(kLPUART0_RST_SHIFT_RSTn);
 
-    gpio_pin_config_t gpio3_pin63_config = {
-        .pinDirection = kGPIO_DigitalOutput,
-        .outputLogic = 0U
+    /* 1. LPUART0: P0_2 (RXD) y P0_3 (TXD) hacia consola virtual MCU-Link */
+    const port_pin_config_t uart_pin_config = {
+        .pullSelect          = kPORT_PullUp,
+        .pullValueSelect     = kPORT_LowPullResistor,
+        .slewRate            = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable     = kPORT_OpenDrainDisable,
+        .driveStrength       = kPORT_LowDriveStrength,
+        .driveStrength1      = kPORT_NormalDriveStrength,
+        .mux                 = kPORT_MuxAlt2, /* LPUART0_RXD / LPUART0_TXD */
+        .inputBuffer         = kPORT_InputBufferEnable,
+        .invertInput         = kPORT_InputNormal,
+        .lockRegister        = kPORT_UnlockRegister
     };
-    /* Initialize GPIO functionality on pin PIO3_12 (pin 63)  */
-    GPIO_PinInit(GPIO3, 12U, &gpio3_pin63_config);
+    PORT_SetPinConfig(PORT0, 2U, &uart_pin_config);
+    PORT_SetPinConfig(PORT0, 3U, &uart_pin_config);
 
-    const port_pin_config_t port3_12_pin63_config = {/* Internal pull-up/down resistor is disabled */
-                                                     kPORT_PullDisable,
-                                                     /* Low internal pull resistor value is selected. */
-                                                     kPORT_LowPullResistor,
-                                                     /* Fast slew rate is configured */
-                                                     kPORT_FastSlewRate,
-                                                     /* Passive input filter is disabled */
-                                                     kPORT_PassiveFilterDisable,
-                                                     /* Open drain output is disabled */
-                                                     kPORT_OpenDrainDisable,
-                                                     /* Low drive strength is configured */
-                                                     kPORT_LowDriveStrength,
-                                                     /* Normal drive strength is configured */
-                                                     kPORT_NormalDriveStrength,
-                                                     /* Pin is configured as P3_12 */
-                                                     kPORT_MuxAlt0,
-                                                     /* Digital input enabled */
-                                                     kPORT_InputBufferEnable,
-                                                     /* Digital input is not inverted */
-                                                     kPORT_InputNormal,
-                                                     /* Pin Control Register fields [15:0] are not locked */
-                                                     kPORT_UnlockRegister};
-    /* PORT3_12 (pin 63) is configured as P3_12 */
-    PORT_SetPinConfig(PORT3, 12U, &port3_12_pin63_config);
+    /* 2. LED de Estado: P3_13 (LED Verde onboard) salida digital GPIO activa-baja */
+    gpio_pin_config_t led_status_gpio = {
+        .pinDirection = kGPIO_DigitalOutput,
+        .outputLogic  = 1U /* 1U = Apagado en logica activa-baja */
+    };
+    GPIO_PinInit(GPIO3, 13U, &led_status_gpio);
+
+    const port_pin_config_t led_status_port = {
+        .pullSelect          = kPORT_PullDisable,
+        .pullValueSelect     = kPORT_LowPullResistor,
+        .slewRate            = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable     = kPORT_OpenDrainDisable,
+        .driveStrength       = kPORT_LowDriveStrength,
+        .driveStrength1      = kPORT_NormalDriveStrength,
+        .mux                 = kPORT_MuxAlt0, /* GPIO3, 13 */
+        .inputBuffer         = kPORT_InputBufferEnable,
+        .invertInput         = kPORT_InputNormal,
+        .lockRegister        = kPORT_UnlockRegister
+    };
+    PORT_SetPinConfig(PORT3, 13U, &led_status_port);
+
+    /* 3. Salida LED Externo / PWM: P3_12 (Conector J1 pin 15) salida digital activa-alta */
+    gpio_pin_config_t led_pwm_gpio = {
+        .pinDirection = kGPIO_DigitalOutput,
+        .outputLogic  = 0U /* 0U = Apagado en logica activa-alta */
+    };
+    GPIO_PinInit(GPIO3, 12U, &led_pwm_gpio);
+
+    const port_pin_config_t led_pwm_port = {
+        .pullSelect          = kPORT_PullDisable,
+        .pullValueSelect     = kPORT_LowPullResistor,
+        .slewRate            = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable     = kPORT_OpenDrainDisable,
+        .driveStrength       = kPORT_LowDriveStrength,
+        .driveStrength1      = kPORT_NormalDriveStrength,
+        .mux                 = kPORT_MuxAlt0, /* GPIO3, 12 */
+        .inputBuffer         = kPORT_InputBufferEnable,
+        .invertInput         = kPORT_InputNormal,
+        .lockRegister        = kPORT_UnlockRegister
+    };
+    PORT_SetPinConfig(PORT3, 12U, &led_pwm_port);
+
+    /* 4. Pulsadores de Usuario: P0_6 (SW3) y P1_7 (SW2) entradas con Pull-Up interno */
+    gpio_pin_config_t btn_gpio = {
+        .pinDirection = kGPIO_DigitalInput,
+        .outputLogic  = 0U
+    };
+    GPIO_PinInit(GPIO0, 6U, &btn_gpio);
+    GPIO_PinInit(GPIO1, 7U, &btn_gpio);
+
+    const port_pin_config_t btn_port = {
+        .pullSelect          = kPORT_PullUp,
+        .pullValueSelect     = kPORT_LowPullResistor,
+        .slewRate            = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable     = kPORT_OpenDrainDisable,
+        .driveStrength       = kPORT_LowDriveStrength,
+        .driveStrength1      = kPORT_NormalDriveStrength,
+        .mux                 = kPORT_MuxAlt0, /* GPIO */
+        .inputBuffer         = kPORT_InputBufferEnable,
+        .invertInput         = kPORT_InputNormal,
+        .lockRegister        = kPORT_UnlockRegister
+    };
+    PORT_SetPinConfig(PORT0, 6U, &btn_port);
+    PORT_SetPinConfig(PORT1, 7U, &btn_port);
 }
 /***********************************************************************************************************************
  * EOF
