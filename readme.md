@@ -18,6 +18,7 @@ Sistema de control de iluminación y consola serial desarrollado sobre el microc
 (El enlace al video se colocara aqui al finalizar la implementacion)
 
 ## Estado actual
-- Configuracion de pines de hardware en `pin_mux.c`: LED de estado (`P3_13`), LED externo (`P3_12`), pulsadores `SW3` y `SW2` con pull-up interno, y lineas serie UART.
-- Consola serie LPUART0 inicializada a 115200 baudios (8N1) con mensaje de arranque.
-- Prueba basica de lectura de pulsadores y encendido de LEDs.
+- Base de tiempo periodica de 1 ms implementada con temporizador de periferico `CTIMER0` por interrupcion.
+- Eliminacion de SysTick y funciones de retardo bloqueantes (`SDK_DelayAtLeastUs`).
+- Conmutacion periodica del LED de estado cada 500 ms usando el contador global `g_ms`.
+- Avances previos: ruteo de pines y consola serie LPUART0 a 115200.

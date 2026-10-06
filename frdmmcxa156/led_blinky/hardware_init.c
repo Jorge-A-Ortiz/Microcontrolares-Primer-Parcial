@@ -16,6 +16,9 @@
 /*${function:start}*/
 void BOARD_InitHardware(void)
 {
+    CLOCK_SetClockDiv(kCLOCK_DivCTIMER0, 1u);
+    CLOCK_AttachClk(kFRO12M_to_CTIMER0);
+
     BOARD_InitPins();
     BOARD_BootClockFRO12M();
     BOARD_InitBootPeripherals();
