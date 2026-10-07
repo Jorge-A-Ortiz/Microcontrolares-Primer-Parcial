@@ -18,7 +18,7 @@ Sistema de control de iluminación y consola serial desarrollado sobre el microc
 (El enlace al video se colocara aqui al finalizar la implementacion)
 
 ## Estado actual
-- Modulacion por ancho de pulsos (PWM) por hardware implementada en `CTIMER1` con salida en pin `P3_12` (Match 2).
-- Soporte para frecuencias de 500 Hz, 1000 Hz y 2000 Hz, y ciclo de trabajo de 0% a 100% con proteccion anti-desbordamiento del contador `TC`.
-- Conmutacion interactiva mediante pulsadores: pulsacion corta cambia ciclo de trabajo (25%, 50%, 75%, 100%, 0%) y pulsacion larga cambia frecuencia (1000 Hz, 2000 Hz, 500 Hz).
-- Avances previos: interrupciones GPIO con antirrebote de 30 ms, base de tiempo CTIMER0 de 1 ms, ruteo de pines y consola serie LPUART0.
+- Maquina de estados finita (FSM) con 3 modos operativos: MANUAL (duty fijo al 25%), AUTO (rampa triangular de 0% a 100% en pasos de 60 ms con retencion en extremos de apagado y encendido) y PAUSA (PWM forzado a 0% con retencion de estado).
+- Senalizacion en LED de estado (P3_13): encendido continuo en MANUAL, parpadeo a 1500 ms en AUTO y parpadeo a 375 ms en PAUSA.
+- Control concurrente por pulsadores fisicos: pulsacion corta conmuta MANUAL <-> AUTO; pulsacion larga conmuta / reanuda modo PAUSA.
+- Avances previos: modulacion PWM por hardware en CTIMER1, interrupciones GPIO con filtro antirrebote de 30 ms, temporizador CTIMER0 de 1 ms, ruteo de pines y consola serie LPUART0.

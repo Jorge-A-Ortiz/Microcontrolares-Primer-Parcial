@@ -28,11 +28,36 @@
 #define DEBOUNCE_TIME_MS      30U
 #define LONG_PRESS_TIME_MS    1500U
 
+#define AUTO_STEP_INTERVAL_MS 60U
+#define AUTO_MIN_DUTY         0U
+#define AUTO_MAX_DUTY         100U
+#define AUTO_HOLD_MS          1500U
+
+#define STATUS_BLINK_AUTO_MS  1500U
+#define STATUS_BLINK_PAUSE_MS 375U
+
+typedef enum {
+    STATE_MANUAL = 0,
+    STATE_AUTO,
+    STATE_PAUSE
+} app_state_t;
+
 static volatile uint32_t g_ms = 0U;
 static volatile uint32_t g_buttonEdgePending = 0U;
 
+static app_state_t s_currentState  = STATE_MANUAL;
+static app_state_t s_previousState = STATE_MANUAL;
+
 static uint32_t s_pwmFrequency = 1000U;
-static uint8_t s_pwmDuty = 25U;
+static uint8_t  s_manualDuty   = 25U;
+static uint8_t  s_appliedDuty  = 25U;
+
+static uint8_t  s_autoDuty       = AUTO_MIN_DUTY;
+static bool     s_autoAscending  = true;
+static uint32_t s_lastAutoStepMs = 0U;
+
+static uint32_t s_lastStatusLedToggleMs = 0U;
+static bool     s_statusLedOn = true;
 
 void SysTick_Handler(void)
 {
@@ -121,7 +146,7 @@ static void Hardware_PwmApply(uint8_t duty, uint32_t freq)
     }
 
     CTIMER_StartTimer(APP_PWM_TIMER);
-    s_pwmDuty = duty;
+    s_appliedDuty = duty;
     s_pwmFrequency = freq;
 }
 
@@ -132,7 +157,7 @@ static void Hardware_PwmInit(void)
     cfg.prescale = 0U;
     CTIMER_Init(APP_PWM_TIMER, &cfg);
 
-    Hardware_PwmApply(25U, 1000U);
+    Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
 }
 
 static void Hardware_ButtonInit(void)
@@ -144,6 +169,135 @@ static void Hardware_ButtonInit(void)
     GPIO_GpioClearInterruptFlags(APP_BTN_SW2_GPIO, 1UL << APP_BTN_SW2_PIN);
     GPIO_SetPinInterruptConfig(APP_BTN_SW2_GPIO, APP_BTN_SW2_PIN, kGPIO_InterruptEitherEdge);
     EnableIRQ(APP_BTN_SW2_IRQn);
+}
+
+static void FSM_TransitionTo(app_state_t nextState)
+{
+    if (nextState == s_currentState)
+    {
+        return;
+    }
+
+    if (nextState == STATE_PAUSE)
+    {
+        s_previousState = s_currentState;
+        s_currentState  = STATE_PAUSE;
+        Hardware_PwmApply(0U, s_pwmFrequency);
+    }
+    else if (nextState == STATE_AUTO)
+    {
+        s_currentState = STATE_AUTO;
+        s_lastAutoStepMs = g_ms;
+        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+    }
+    else if (nextState == STATE_MANUAL)
+    {
+        s_currentState = STATE_MANUAL;
+        Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
+        StatusLed_Set(true);
+        s_statusLedOn = true;
+    }
+}
+
+static void FSM_ResumeFromPause(void)
+{
+    if (s_currentState != STATE_PAUSE)
+    {
+        return;
+    }
+
+    app_state_t target = (s_previousState == STATE_AUTO) ? STATE_AUTO : STATE_MANUAL;
+    s_currentState = target;
+
+    if (target == STATE_AUTO)
+    {
+        s_lastAutoStepMs = g_ms;
+        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+    }
+    else
+    {
+        Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
+        StatusLed_Set(true);
+        s_statusLedOn = true;
+    }
+}
+
+static void Task_AutoRamp(uint32_t now)
+{
+    static uint32_t s_holdStartTime = 0U;
+    static bool s_isHolding = false;
+
+    if (s_currentState != STATE_AUTO)
+    {
+        s_isHolding = false;
+        return;
+    }
+
+    if (s_isHolding)
+    {
+        if ((uint32_t)(now - s_holdStartTime) >= AUTO_HOLD_MS)
+        {
+            s_isHolding = false;
+            s_lastAutoStepMs = now;
+        }
+        return;
+    }
+
+    if ((uint32_t)(now - s_lastAutoStepMs) >= AUTO_STEP_INTERVAL_MS)
+    {
+        s_lastAutoStepMs = now;
+
+        if (s_autoAscending)
+        {
+            if (s_autoDuty < AUTO_MAX_DUTY)
+            {
+                s_autoDuty++;
+            }
+            else
+            {
+                s_autoAscending = false;
+                s_isHolding = true;
+                s_holdStartTime = now;
+            }
+        }
+        else
+        {
+            if (s_autoDuty > AUTO_MIN_DUTY)
+            {
+                s_autoDuty--;
+            }
+            else
+            {
+                s_autoAscending = true;
+                s_isHolding = true;
+                s_holdStartTime = now;
+            }
+        }
+
+        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+    }
+}
+
+static void Task_StatusLed(uint32_t now)
+{
+    if (s_currentState == STATE_MANUAL)
+    {
+        if (!s_statusLedOn)
+        {
+            StatusLed_Set(true);
+            s_statusLedOn = true;
+        }
+        return;
+    }
+
+    uint32_t interval = (s_currentState == STATE_AUTO) ? STATUS_BLINK_AUTO_MS : STATUS_BLINK_PAUSE_MS;
+
+    if ((uint32_t)(now - s_lastStatusLedToggleMs) >= interval)
+    {
+        s_lastStatusLedToggleMs = now;
+        s_statusLedOn = !s_statusLedOn;
+        StatusLed_Set(s_statusLedOn);
+    }
 }
 
 static void ProcessButton(uint32_t now)
@@ -184,14 +338,22 @@ static void ProcessButton(uint32_t now)
 
                 if (!s_longPressExecuted && (pressDuration >= DEBOUNCE_TIME_MS) && (pressDuration < LONG_PRESS_TIME_MS))
                 {
-                    static const uint8_t duties[] = {25U, 50U, 75U, 100U, 0U};
-                    static uint8_t dutyIdx = 0U;
-                    dutyIdx = (dutyIdx + 1U) % 5U;
-                    uint8_t nextDuty = duties[dutyIdx];
-
-                    Hardware_PwmApply(nextDuty, s_pwmFrequency);
-                    PRINTF("\r\n>>> [PWM] Pulsacion corta (%u ms) -> Duty: %u%% (Freq: %u Hz)\r\n",
-                           (unsigned int)pressDuration, (unsigned int)nextDuty, (unsigned int)s_pwmFrequency);
+                    if (s_currentState == STATE_MANUAL)
+                    {
+                        FSM_TransitionTo(STATE_AUTO);
+                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo AUTO (Rampa triangular 10%% a 90%%)\r\n",
+                               (unsigned int)pressDuration);
+                    }
+                    else if (s_currentState == STATE_AUTO)
+                    {
+                        FSM_TransitionTo(STATE_MANUAL);
+                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo MANUAL (Duty: %u%%)\r\n",
+                               (unsigned int)pressDuration, (unsigned int)s_manualDuty);
+                    }
+                    else
+                    {
+                        PRINTF("\r\n>>> [BOTON] Pulsacion corta ignorada en modo PAUSA\r\n");
+                    }
                 }
             }
         }
@@ -202,11 +364,18 @@ static void ProcessButton(uint32_t now)
         if ((uint32_t)(now - s_pressStartTime) >= LONG_PRESS_TIME_MS)
         {
             s_longPressExecuted = true;
-            uint32_t nextFreq = (s_pwmFrequency == 1000U) ? 2000U : (s_pwmFrequency == 2000U) ? 500U : 1000U;
 
-            Hardware_PwmApply(s_pwmDuty, nextFreq);
-            PRINTF("\r\n>>> [PWM] Pulsacion larga (>= 1500 ms) -> Freq: %u Hz (Duty: %u%%)\r\n",
-                   (unsigned int)nextFreq, (unsigned int)s_pwmDuty);
+            if (s_currentState == STATE_PAUSE)
+            {
+                FSM_ResumeFromPause();
+                PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1500 ms) -> REANUDADO a modo %s\r\n",
+                       (s_currentState == STATE_AUTO) ? "AUTO" : "MANUAL");
+            }
+            else
+            {
+                FSM_TransitionTo(STATE_PAUSE);
+                PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1500 ms) -> Modo PAUSA (PWM apagado)\r\n");
+            }
         }
     }
 
@@ -225,26 +394,18 @@ int main(void)
     PRINTF("\r\n====================================================\r\n");
     PRINTF(" FRDM-MCXA156 - CONTROLADOR DE ILUMINACION BARE-METAL\r\n");
     PRINTF(" Estudiante: Jorge Alberto Ortiz Nieves | Mat: 20250504\r\n");
-    PRINTF(" PWM Hardware CTIMER1: Freq: %u Hz | Duty: %u%%\r\n", (unsigned int)s_pwmFrequency, (unsigned int)s_pwmDuty);
+    PRINTF(" Modo Inicial: MANUAL | Freq: 1000 Hz | Duty: 25%%\r\n");
     PRINTF("====================================================\r\n");
-    PRINTF("Prueba de PWM por hardware en P3_12 (J1-15):\r\n");
-    PRINTF(" - Pulsacion corta: cambia Duty (25%% -> 50%% -> 75%% -> 100%% -> 0%%).\r\n");
-    PRINTF(" - Pulsacion larga: cambia Frecuencia (1000 Hz -> 2000 Hz -> 500 Hz).\r\n\r\n");
-
-    uint32_t lastLedToggleMs = 0U;
-    bool statusLedState = true;
+    PRINTF("Controles por pulsador (SW2 / SW3):\r\n");
+    PRINTF(" - Pulsacion corta (< 1.5s): Alterna MANUAL <-> AUTO\r\n");
+    PRINTF(" - Pulsacion larga (>= 1.5s): Entra / Sale de PAUSA\r\n\r\n");
 
     while (1)
     {
         uint32_t now = g_ms;
 
-        if ((uint32_t)(now - lastLedToggleMs) >= 500U)
-        {
-            lastLedToggleMs = now;
-            statusLedState = !statusLedState;
-            StatusLed_Set(statusLedState);
-        }
-
+        Task_StatusLed(now);
+        Task_AutoRamp(now);
         ProcessButton(now);
     }
 }
