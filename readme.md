@@ -18,7 +18,7 @@ Sistema de control de iluminación y consola serial desarrollado sobre el microc
 (El enlace al video se colocara aqui al finalizar la implementacion)
 
 ## Estado actual
-- Interrupciones fisicas GPIO en ambos flancos para pulsadores `SW3` (`GPIO0`) y `SW2` (`GPIO1`).
-- Filtro antirrebote de 30 ms no bloqueante en el bucle principal.
-- Discriminacion temporal entre pulsacion corta (< 1.5 s) y pulsacion larga (>= 1.5 s) con reporte por consola serie y medicion de tiempo en ms.
-- Avances previos: base de tiempo CTIMER0 de 1 ms, ruteo de pines y consola serie LPUART0.
+- Modulacion por ancho de pulsos (PWM) por hardware implementada en `CTIMER1` con salida en pin `P3_12` (Match 2).
+- Soporte para frecuencias de 500 Hz, 1000 Hz y 2000 Hz, y ciclo de trabajo de 0% a 100% con proteccion anti-desbordamiento del contador `TC`.
+- Conmutacion interactiva mediante pulsadores: pulsacion corta cambia ciclo de trabajo (25%, 50%, 75%, 100%, 0%) y pulsacion larga cambia frecuencia (1000 Hz, 2000 Hz, 500 Hz).
+- Avances previos: interrupciones GPIO con antirrebote de 30 ms, base de tiempo CTIMER0 de 1 ms, ruteo de pines y consola serie LPUART0.

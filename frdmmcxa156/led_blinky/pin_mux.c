@@ -114,13 +114,7 @@ void BOARD_InitPins(void)
     };
     PORT_SetPinConfig(PORT3, 13U, &led_status_port);
 
-    /* 3. Salida LED Externo / PWM: P3_12 (Conector J1 pin 15) salida digital activa-alta */
-    gpio_pin_config_t led_pwm_gpio = {
-        .pinDirection = kGPIO_DigitalOutput,
-        .outputLogic  = 0U /* 0U = Apagado en logica activa-alta */
-    };
-    GPIO_PinInit(GPIO3, 12U, &led_pwm_gpio);
-
+    /* 3. Salida PWM: P3_12 (Conector J1 pin 15) configurado como CT1_MAT2 */
     const port_pin_config_t led_pwm_port = {
         .pullSelect          = kPORT_PullDisable,
         .pullValueSelect     = kPORT_LowPullResistor,
@@ -129,7 +123,7 @@ void BOARD_InitPins(void)
         .openDrainEnable     = kPORT_OpenDrainDisable,
         .driveStrength       = kPORT_LowDriveStrength,
         .driveStrength1      = kPORT_NormalDriveStrength,
-        .mux                 = kPORT_MuxAlt0, /* GPIO3, 12 */
+        .mux                 = kPORT_MuxAlt4, /* CT1_MAT2 */
         .inputBuffer         = kPORT_InputBufferEnable,
         .invertInput         = kPORT_InputNormal,
         .lockRegister        = kPORT_UnlockRegister

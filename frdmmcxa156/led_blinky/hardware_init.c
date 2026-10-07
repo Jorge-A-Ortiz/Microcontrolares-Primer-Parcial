@@ -19,6 +19,9 @@ void BOARD_InitHardware(void)
     CLOCK_SetClockDiv(kCLOCK_DivCTIMER0, 1u);
     CLOCK_AttachClk(kFRO12M_to_CTIMER0);
 
+    CLOCK_SetClockDiv(kCLOCK_DivCTIMER1, 1u);
+    CLOCK_AttachClk(kFRO12M_to_CTIMER1);
+
     BOARD_InitPins();
     BOARD_BootClockFRO12M();
     BOARD_InitBootPeripherals();
