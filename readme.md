@@ -18,7 +18,7 @@ Sistema de control de iluminación y consola serial desarrollado sobre el microc
 (El enlace al video se colocara aqui al finalizar la implementacion)
 
 ## Estado actual
-- Base de tiempo periodica de 1 ms implementada con temporizador de periferico `CTIMER0` por interrupcion.
-- Eliminacion de SysTick y funciones de retardo bloqueantes (`SDK_DelayAtLeastUs`).
-- Conmutacion periodica del LED de estado cada 500 ms usando el contador global `g_ms`.
-- Avances previos: ruteo de pines y consola serie LPUART0 a 115200.
+- Interrupciones fisicas GPIO en ambos flancos para pulsadores `SW3` (`GPIO0`) y `SW2` (`GPIO1`).
+- Filtro antirrebote de 30 ms no bloqueante en el bucle principal.
+- Discriminacion temporal entre pulsacion corta (< 1.5 s) y pulsacion larga (>= 1.5 s) con reporte por consola serie y medicion de tiempo en ms.
+- Avances previos: base de tiempo CTIMER0 de 1 ms, ruteo de pines y consola serie LPUART0.
