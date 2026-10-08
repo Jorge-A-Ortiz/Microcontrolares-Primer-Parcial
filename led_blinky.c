@@ -1,7 +1,10 @@
+#include <string.h>
+#include <ctype.h>
 #include "fsl_common.h"
 #include "fsl_debug_console.h"
 #include "fsl_gpio.h"
 #include "fsl_ctimer.h"
+#include "fsl_lpuart.h"
 #include "pin_mux.h"
 #include "clock_config.h"
 #include "board.h"
@@ -36,6 +39,10 @@
 #define STATUS_BLINK_AUTO_MS  1500U
 #define STATUS_BLINK_PAUSE_MS 375U
 
+#define RX_RING_BUFFER_SIZE   128U
+#define CMD_LINE_MAX_LEN      63U
+#define TELEMETRY_INTERVAL_MS 1000U
+
 typedef enum {
     STATE_MANUAL = 0,
     STATE_AUTO,
@@ -44,6 +51,12 @@ typedef enum {
 
 static volatile uint32_t g_ms = 0U;
 static volatile uint32_t g_buttonEdgePending = 0U;
+
+static volatile uint8_t  s_rxRingBuffer[RX_RING_BUFFER_SIZE];
+static volatile uint16_t s_rxRingHead = 0U;
+static volatile uint16_t s_rxRingTail = 0U;
+static volatile uint32_t s_rxOverflowCount = 0U;
+static volatile uint32_t s_rxErrorCount = 0U;
 
 static app_state_t s_currentState  = STATE_MANUAL;
 static app_state_t s_previousState = STATE_MANUAL;
@@ -58,6 +71,16 @@ static uint32_t s_lastAutoStepMs = 0U;
 
 static uint32_t s_lastStatusLedToggleMs = 0U;
 static bool     s_statusLedOn = true;
+
+static uint32_t s_shortPressCount  = 0U;
+static uint32_t s_longPressCount   = 0U;
+static uint32_t s_totalErrors      = 0U;
+static bool     s_telemetryEnabled = false;
+static uint32_t s_lastTelemetryMs  = 0U;
+
+static char     s_cmdLine[CMD_LINE_MAX_LEN + 1U];
+static uint16_t s_cmdLineIndex = 0U;
+static bool     s_cmdDiscardUntilEol = false;
 
 void SysTick_Handler(void)
 {
@@ -102,6 +125,44 @@ static inline uint32_t TakeButtonEdge(void)
     g_buttonEdgePending = 0U;
     EnableGlobalIRQ(irqState);
     return pending;
+}
+
+void LPUART0_IRQHandler(void)
+{
+    uint32_t status = LPUART_GetStatusFlags(LPUART0);
+
+    if ((status & kLPUART_RxDataRegFullFlag) != 0U)
+    {
+        uint8_t byte = LPUART_ReadByte(LPUART0);
+        uint16_t nextHead = (uint16_t)((s_rxRingHead + 1U) % RX_RING_BUFFER_SIZE);
+        if (nextHead != s_rxRingTail)
+        {
+            s_rxRingBuffer[s_rxRingHead] = byte;
+            s_rxRingHead = nextHead;
+        }
+        else
+        {
+            s_rxOverflowCount++;
+        }
+    }
+
+    if ((status & (kLPUART_RxOverrunFlag | kLPUART_FramingErrorFlag | kLPUART_ParityErrorFlag)) != 0U)
+    {
+        LPUART_ClearStatusFlags(LPUART0, kLPUART_RxOverrunFlag | kLPUART_FramingErrorFlag | kLPUART_ParityErrorFlag);
+        s_rxErrorCount++;
+    }
+    SDK_ISR_EXIT_BARRIER;
+}
+
+static inline bool UartRingBufferGet(uint8_t *ch)
+{
+    if (s_rxRingHead == s_rxRingTail)
+    {
+        return false;
+    }
+    *ch = s_rxRingBuffer[s_rxRingTail];
+    s_rxRingTail = (uint16_t)((s_rxRingTail + 1U) % RX_RING_BUFFER_SIZE);
+    return true;
 }
 
 static inline void StatusLed_Set(bool on)
@@ -171,6 +232,12 @@ static void Hardware_ButtonInit(void)
     EnableIRQ(APP_BTN_SW2_IRQn);
 }
 
+static void Hardware_UartInit(void)
+{
+    LPUART_EnableInterrupts(LPUART0, kLPUART_RxDataRegFullInterruptEnable);
+    EnableIRQ(LPUART0_IRQn);
+}
+
 static void FSM_TransitionTo(app_state_t nextState)
 {
     if (nextState == s_currentState)
@@ -189,6 +256,7 @@ static void FSM_TransitionTo(app_state_t nextState)
         s_currentState = STATE_AUTO;
         s_lastAutoStepMs = g_ms;
         Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+        PRINTF("[AUTO] Modo automatico activado - Duty: %u%%\r\n", (unsigned int)s_autoDuty);
     }
     else if (nextState == STATE_MANUAL)
     {
@@ -213,6 +281,7 @@ static void FSM_ResumeFromPause(void)
     {
         s_lastAutoStepMs = g_ms;
         Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+        PRINTF("[AUTO] Modo automatico reanudado - Duty: %u%%\r\n", (unsigned int)s_autoDuty);
     }
     else
     {
@@ -252,12 +321,15 @@ static void Task_AutoRamp(uint32_t now)
             if (s_autoDuty < AUTO_MAX_DUTY)
             {
                 s_autoDuty++;
+                Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+                PRINTF("[AUTO] Duty: %u%%\r\n", (unsigned int)s_autoDuty);
             }
             else
             {
                 s_autoAscending = false;
                 s_isHolding = true;
                 s_holdStartTime = now;
+                PRINTF("[AUTO] Duty: 100%% (Encendido maximo - retencion 1.5s)\r\n");
             }
         }
         else
@@ -265,16 +337,17 @@ static void Task_AutoRamp(uint32_t now)
             if (s_autoDuty > AUTO_MIN_DUTY)
             {
                 s_autoDuty--;
+                Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
+                PRINTF("[AUTO] Duty: %u%%\r\n", (unsigned int)s_autoDuty);
             }
             else
             {
                 s_autoAscending = true;
                 s_isHolding = true;
                 s_holdStartTime = now;
+                PRINTF("[AUTO] Duty: 0%% (Apagado completo - retencion 1.5s)\r\n");
             }
         }
-
-        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
     }
 }
 
@@ -338,11 +411,12 @@ static void ProcessButton(uint32_t now)
 
                 if (!s_longPressExecuted && (pressDuration >= DEBOUNCE_TIME_MS) && (pressDuration < LONG_PRESS_TIME_MS))
                 {
+                    s_shortPressCount++;
+
                     if (s_currentState == STATE_MANUAL)
                     {
                         FSM_TransitionTo(STATE_AUTO);
-                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo AUTO (Rampa triangular 10%% a 90%%)\r\n",
-                               (unsigned int)pressDuration);
+                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo AUTO\r\n", (unsigned int)pressDuration);
                     }
                     else if (s_currentState == STATE_AUTO)
                     {
@@ -364,6 +438,7 @@ static void ProcessButton(uint32_t now)
         if ((uint32_t)(now - s_pressStartTime) >= LONG_PRESS_TIME_MS)
         {
             s_longPressExecuted = true;
+            s_longPressCount++;
 
             if (s_currentState == STATE_PAUSE)
             {
@@ -382,12 +457,323 @@ static void ProcessButton(uint32_t now)
     (void)TakeButtonEdge();
 }
 
+static bool ParseUnsignedNumber(const char *str, uint32_t *valOut)
+{
+    if (str == NULL || *str == '\0')
+    {
+        return false;
+    }
+
+    uint64_t val = 0;
+    while (*str != '\0')
+    {
+        if (!isdigit((unsigned char)*str))
+        {
+            return false;
+        }
+        val = (val * 10U) + (uint32_t)(*str - '0');
+        if (val > 0xFFFFFFFFULL)
+        {
+            return false;
+        }
+        str++;
+    }
+
+    *valOut = (uint32_t)val;
+    return true;
+}
+
+static void ExecuteCommand(char *cmd)
+{
+    while (*cmd == ' ' || *cmd == '\t')
+    {
+        cmd++;
+    }
+
+    int len = (int)strlen(cmd);
+    while (len > 0 && (cmd[len - 1] == ' ' || cmd[len - 1] == '\t'))
+    {
+        cmd[--len] = '\0';
+    }
+
+    if (len == 0)
+    {
+        return;
+    }
+
+    if (strcmp(cmd, "HELP") == 0)
+    {
+        PRINTF("\r\n--- COMANDOS DISPONIBLES ---\r\n");
+        PRINTF("HELP\r\n");
+        PRINTF("STATUS\r\n");
+        PRINTF("MODE MANUAL\r\n");
+        PRINTF("MODE AUTO\r\n");
+        PRINTF("DUTY <0-100>\r\n");
+        PRINTF("FREQ <500|1000|2000>\r\n");
+        PRINTF("PAUSE\r\n");
+        PRINTF("RESUME\r\n");
+        PRINTF("STREAM ON\r\n");
+        PRINTF("STREAM OFF\r\n");
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "STATUS") == 0)
+    {
+        const char *stateStr = (s_currentState == STATE_MANUAL) ? "MANUAL" :
+                               (s_currentState == STATE_AUTO)   ? "AUTO"   : "PAUSA";
+
+        PRINTF("STATUS MODE=%s FREQ=%u DUTY=%u DUTY_MANUAL=%u UPTIME=%ums BTN_SHORT=%u BTN_LONG=%u ERRORS=%u\r\n",
+               stateStr, (unsigned int)s_pwmFrequency, (unsigned int)s_appliedDuty,
+               (unsigned int)s_manualDuty, (unsigned int)g_ms,
+               (unsigned int)s_shortPressCount, (unsigned int)s_longPressCount,
+               (unsigned int)s_totalErrors);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "MODE MANUAL") == 0)
+    {
+        if (s_currentState == STATE_PAUSE)
+        {
+            s_totalErrors++;
+            PRINTF("ERR STATE\r\n");
+            return;
+        }
+        FSM_TransitionTo(STATE_MANUAL);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "MODE AUTO") == 0)
+    {
+        if (s_currentState == STATE_PAUSE)
+        {
+            s_totalErrors++;
+            PRINTF("ERR STATE\r\n");
+            return;
+        }
+        FSM_TransitionTo(STATE_AUTO);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strncmp(cmd, "DUTY", 4) == 0)
+    {
+        char *arg = cmd + 4;
+        if (*arg == '\0')
+        {
+            s_totalErrors++;
+            PRINTF("ERR ARG\r\n");
+            return;
+        }
+        if (*arg != ' ')
+        {
+            s_totalErrors++;
+            PRINTF("ERR COMMAND\r\n");
+            return;
+        }
+        while (*arg == ' ')
+        {
+            arg++;
+        }
+
+        if (s_currentState == STATE_PAUSE || s_currentState == STATE_AUTO)
+        {
+            s_totalErrors++;
+            PRINTF("ERR STATE\r\n");
+            return;
+        }
+
+        uint32_t dutyVal = 0U;
+        if (!ParseUnsignedNumber(arg, &dutyVal))
+        {
+            s_totalErrors++;
+            PRINTF("ERR ARG\r\n");
+            return;
+        }
+
+        if (dutyVal > 100U)
+        {
+            s_totalErrors++;
+            PRINTF("ERR RANGE\r\n");
+            return;
+        }
+
+        s_manualDuty = (uint8_t)dutyVal;
+        Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strncmp(cmd, "FREQ", 4) == 0)
+    {
+        char *arg = cmd + 4;
+        if (*arg == '\0')
+        {
+            s_totalErrors++;
+            PRINTF("ERR ARG\r\n");
+            return;
+        }
+        if (*arg != ' ')
+        {
+            s_totalErrors++;
+            PRINTF("ERR COMMAND\r\n");
+            return;
+        }
+        while (*arg == ' ')
+        {
+            arg++;
+        }
+
+        if (s_currentState == STATE_PAUSE)
+        {
+            s_totalErrors++;
+            PRINTF("ERR STATE\r\n");
+            return;
+        }
+
+        uint32_t freqVal = 0U;
+        if (!ParseUnsignedNumber(arg, &freqVal))
+        {
+            s_totalErrors++;
+            PRINTF("ERR ARG\r\n");
+            return;
+        }
+
+        if (freqVal != 500U && freqVal != 1000U && freqVal != 2000U)
+        {
+            s_totalErrors++;
+            PRINTF("ERR RANGE\r\n");
+            return;
+        }
+
+        s_pwmFrequency = freqVal;
+        Hardware_PwmApply(s_appliedDuty, s_pwmFrequency);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "PAUSE") == 0)
+    {
+        if (s_currentState == STATE_PAUSE)
+        {
+            PRINTF("OK\r\n");
+            return;
+        }
+        FSM_TransitionTo(STATE_PAUSE);
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "RESUME") == 0)
+    {
+        if (s_currentState != STATE_PAUSE)
+        {
+            s_totalErrors++;
+            PRINTF("ERR STATE\r\n");
+            return;
+        }
+        FSM_ResumeFromPause();
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "STREAM ON") == 0)
+    {
+        s_telemetryEnabled = true;
+        s_lastTelemetryMs  = g_ms;
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "STREAM OFF") == 0)
+    {
+        s_telemetryEnabled = false;
+        PRINTF("OK\r\n");
+        return;
+    }
+
+    s_totalErrors++;
+    PRINTF("ERR COMMAND\r\n");
+}
+
+static void ProcessUartRx(void)
+{
+    uint8_t byte = 0U;
+
+    while (UartRingBufferGet(&byte))
+    {
+        if (byte == '\r' || byte == '\n')
+        {
+            if (s_cmdDiscardUntilEol)
+            {
+                s_cmdDiscardUntilEol = false;
+                s_cmdLineIndex = 0U;
+                continue;
+            }
+
+            if (s_cmdLineIndex > 0U)
+            {
+                s_cmdLine[s_cmdLineIndex] = '\0';
+                ExecuteCommand(s_cmdLine);
+                s_cmdLineIndex = 0U;
+            }
+        }
+        else
+        {
+            if (s_cmdDiscardUntilEol)
+            {
+                continue;
+            }
+
+            if (s_cmdLineIndex < CMD_LINE_MAX_LEN)
+            {
+                s_cmdLine[s_cmdLineIndex++] = (char)byte;
+            }
+            else
+            {
+                s_cmdDiscardUntilEol = true;
+                s_cmdLineIndex = 0U;
+                s_totalErrors++;
+                PRINTF("ERR OVERFLOW\r\n");
+            }
+        }
+    }
+
+    if (s_rxOverflowCount > 0U)
+    {
+        s_totalErrors += s_rxOverflowCount;
+        s_rxOverflowCount = 0U;
+    }
+}
+
+static void ProcessTelemetry(uint32_t now)
+{
+    if (!s_telemetryEnabled)
+    {
+        return;
+    }
+
+    if ((uint32_t)(now - s_lastTelemetryMs) >= TELEMETRY_INTERVAL_MS)
+    {
+        s_lastTelemetryMs = now;
+        const char *stateStr = (s_currentState == STATE_MANUAL) ? "MANUAL" :
+                               (s_currentState == STATE_AUTO)   ? "AUTO"   : "PAUSA";
+
+        PRINTF("[TELEMETRY] MODE:%s FREQ:%uHz DUTY:%u%% UPTIME:%ums\r\n",
+               stateStr, (unsigned int)s_pwmFrequency, (unsigned int)s_appliedDuty,
+               (unsigned int)now);
+    }
+}
+
 int main(void)
 {
     BOARD_InitHardware();
     Hardware_TickInit();
     Hardware_PwmInit();
     Hardware_ButtonInit();
+    Hardware_UartInit();
 
     StatusLed_Set(true);
 
@@ -395,10 +781,8 @@ int main(void)
     PRINTF(" FRDM-MCXA156 - CONTROLADOR DE ILUMINACION BARE-METAL\r\n");
     PRINTF(" Estudiante: Jorge Alberto Ortiz Nieves | Mat: 20250504\r\n");
     PRINTF(" Modo Inicial: MANUAL | Freq: 1000 Hz | Duty: 25%%\r\n");
-    PRINTF("====================================================\r\n");
-    PRINTF("Controles por pulsador (SW2 / SW3):\r\n");
-    PRINTF(" - Pulsacion corta (< 1.5s): Alterna MANUAL <-> AUTO\r\n");
-    PRINTF(" - Pulsacion larga (>= 1.5s): Entra / Sale de PAUSA\r\n\r\n");
+    PRINTF(" Ingrese 'HELP' para ver la lista de comandos.\r\n");
+    PRINTF("====================================================\r\n\r\n");
 
     while (1)
     {
@@ -407,5 +791,8 @@ int main(void)
         Task_StatusLed(now);
         Task_AutoRamp(now);
         ProcessButton(now);
+        ProcessTelemetry(now);
+
+        ProcessUartRx();
     }
 }
