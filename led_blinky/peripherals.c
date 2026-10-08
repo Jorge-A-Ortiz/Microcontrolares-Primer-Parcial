@@ -109,18 +109,17 @@ instance:
  * BE CAREFUL MODIFYING THIS COMMENT - IT IS YAML SETTINGS FOR TOOLS **********/
 /* clang-format on */
 
-static void SysTick_init(void) {
-  /* Initialize the systick module. */
+/* static void SysTick_init(void) {
   SysTick_Config(SYSTICK_TICKS);
-}
+} */
 
 /***********************************************************************************************************************
  * Initialization functions
  **********************************************************************************************************************/
 void BOARD_InitPeripherals(void)
 {
-  /* Initialize components */
-  SysTick_init();
+  /* SysTick deshabilitado para cumplir con el requisito bare-metal de CTIMER0 */
+  SysTick->CTRL = 0U;
 }
 
 /***********************************************************************************************************************

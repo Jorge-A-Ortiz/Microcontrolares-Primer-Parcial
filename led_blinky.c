@@ -31,13 +31,12 @@
 #define DEBOUNCE_TIME_MS      30U
 #define LONG_PRESS_TIME_MS    1500U
 
-#define AUTO_STEP_INTERVAL_MS 60U
-#define AUTO_MIN_DUTY         0U
-#define AUTO_MAX_DUTY         100U
-#define AUTO_HOLD_MS          1500U
+#define AUTO_STEP_INTERVAL_MS 20U
+#define AUTO_MIN_DUTY         10U
+#define AUTO_MAX_DUTY         90U
 
-#define STATUS_BLINK_AUTO_MS  1500U
-#define STATUS_BLINK_PAUSE_MS 375U
+#define STATUS_BLINK_AUTO_MS  500U
+#define STATUS_BLINK_PAUSE_MS 125U
 
 #define RX_RING_BUFFER_SIZE   128U
 #define CMD_LINE_MAX_LEN      63U
@@ -48,6 +47,13 @@ typedef enum {
     STATE_AUTO,
     STATE_PAUSE
 } app_state_t;
+
+typedef enum {
+    BTN_STATE_IDLE = 0,
+    BTN_STATE_DEBOUNCE_PRESS,
+    BTN_STATE_PRESSED,
+    BTN_STATE_DEBOUNCE_RELEASE
+} button_fsm_state_t;
 
 static volatile uint32_t g_ms = 0U;
 static volatile uint32_t g_buttonEdgePending = 0U;
@@ -84,6 +90,7 @@ static bool     s_cmdDiscardUntilEol = false;
 
 void SysTick_Handler(void)
 {
+    /* SysTick desactivado en peripherals.c; CTIMER0 provee la base de tiempo de 1 ms */
 }
 
 void CTimer0_TickCallback(uint32_t flags)
@@ -196,10 +203,36 @@ static void Hardware_TickInit(void)
 static void Hardware_PwmApply(uint8_t duty, uint32_t freq)
 {
     uint32_t timerClockHz = CLOCK_GetCTimerClkFreq(1U);
+    uint32_t periodTicks = (timerClockHz / freq) - 1U;
 
-    CTIMER_SetupPwm(APP_PWM_TIMER, APP_PWM_PERIOD_CH, APP_PWM_OUTPUT_CH,
-                    duty, freq, timerClockHz, false);
+    /* Configurar el período en MR3 */
+    APP_PWM_TIMER->MR[APP_PWM_PERIOD_CH] = periodTicks;
 
+    /* Tratamiento especial de casos límite 0% y 100% para evitar pulsos residuales / glitches */
+    if (duty == 0U)
+    {
+        /* Desacoplar salida de modo PWM y forzar nivel lógico bajo constante (0V) vía EMR */
+        APP_PWM_TIMER->PWMC &= ~(1UL << APP_PWM_OUTPUT_CH);
+        APP_PWM_TIMER->EMR &= ~(1UL << APP_PWM_OUTPUT_CH);
+        APP_PWM_TIMER->MR[APP_PWM_OUTPUT_CH] = periodTicks + 1U;
+    }
+    else if (duty == 100U)
+    {
+        /* Desacoplar salida de modo PWM y forzar nivel lógico alto constante (3.3V) vía EMR */
+        APP_PWM_TIMER->PWMC &= ~(1UL << APP_PWM_OUTPUT_CH);
+        APP_PWM_TIMER->EMR |= (1UL << APP_PWM_OUTPUT_CH);
+        APP_PWM_TIMER->MR[APP_PWM_OUTPUT_CH] = 0U;
+    }
+    else
+    {
+        /* Modo PWM activo continuo: calcular punto de coincidencia */
+        uint32_t pulseTicks = (periodTicks * (100U - (uint32_t)duty)) / 100U;
+        APP_PWM_TIMER->MR[APP_PWM_OUTPUT_CH] = pulseTicks;
+        APP_PWM_TIMER->PWMC |= (1UL << APP_PWM_OUTPUT_CH);
+    }
+
+    /* Si el contador actual TC superó el nuevo período MR3 tras un cambio de frecuencia,
+     * reseteamos TC a 0 para evitar desbordamiento de 358 s. */
     if (APP_PWM_TIMER->TC >= APP_PWM_TIMER->MR[APP_PWM_PERIOD_CH])
     {
         APP_PWM_TIMER->TC = 0U;
@@ -214,9 +247,15 @@ static void Hardware_PwmApply(uint8_t duty, uint32_t freq)
 static void Hardware_PwmInit(void)
 {
     ctimer_config_t cfg;
+    uint32_t timerClockHz = CLOCK_GetCTimerClkFreq(1U);
+
     CTIMER_GetDefaultConfig(&cfg);
     cfg.prescale = 0U;
     CTIMER_Init(APP_PWM_TIMER, &cfg);
+
+    /* Inicializar PWM en CTIMER1 con Match 3 como período y Match 2 como salida (P3_12) */
+    CTIMER_SetupPwm(APP_PWM_TIMER, APP_PWM_PERIOD_CH, APP_PWM_OUTPUT_CH,
+                    s_manualDuty, s_pwmFrequency, timerClockHz, false);
 
     Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
 }
@@ -253,15 +292,16 @@ static void FSM_TransitionTo(app_state_t nextState)
     }
     else if (nextState == STATE_AUTO)
     {
-        s_currentState = STATE_AUTO;
+        s_currentState   = STATE_AUTO;
+        s_autoDuty       = AUTO_MIN_DUTY; /* Inicia en 10% ascendente según mandato */
+        s_autoAscending  = true;
         s_lastAutoStepMs = g_ms;
         Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
-        PRINTF("[AUTO] Modo automatico activado - Duty: %u%%\r\n", (unsigned int)s_autoDuty);
     }
     else if (nextState == STATE_MANUAL)
     {
         s_currentState = STATE_MANUAL;
-        Hardware_PwmApply(s_manualDuty, s_pwmFrequency);
+        Hardware_PwmApply(s_manualDuty, s_pwmFrequency); /* Restaura último duty manual */
         StatusLed_Set(true);
         s_statusLedOn = true;
     }
@@ -280,8 +320,7 @@ static void FSM_ResumeFromPause(void)
     if (target == STATE_AUTO)
     {
         s_lastAutoStepMs = g_ms;
-        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
-        PRINTF("[AUTO] Modo automatico reanudado - Duty: %u%%\r\n", (unsigned int)s_autoDuty);
+        Hardware_PwmApply(s_autoDuty, s_pwmFrequency); /* Continúa rampa desde donde quedó */
     }
     else
     {
@@ -293,22 +332,8 @@ static void FSM_ResumeFromPause(void)
 
 static void Task_AutoRamp(uint32_t now)
 {
-    static uint32_t s_holdStartTime = 0U;
-    static bool s_isHolding = false;
-
     if (s_currentState != STATE_AUTO)
     {
-        s_isHolding = false;
-        return;
-    }
-
-    if (s_isHolding)
-    {
-        if ((uint32_t)(now - s_holdStartTime) >= AUTO_HOLD_MS)
-        {
-            s_isHolding = false;
-            s_lastAutoStepMs = now;
-        }
         return;
     }
 
@@ -321,15 +346,11 @@ static void Task_AutoRamp(uint32_t now)
             if (s_autoDuty < AUTO_MAX_DUTY)
             {
                 s_autoDuty++;
-                Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
-                PRINTF("[AUTO] Duty: %u%%\r\n", (unsigned int)s_autoDuty);
             }
             else
             {
                 s_autoAscending = false;
-                s_isHolding = true;
-                s_holdStartTime = now;
-                PRINTF("[AUTO] Duty: 100%% (Encendido maximo - retencion 1.5s)\r\n");
+                s_autoDuty--;
             }
         }
         else
@@ -337,17 +358,15 @@ static void Task_AutoRamp(uint32_t now)
             if (s_autoDuty > AUTO_MIN_DUTY)
             {
                 s_autoDuty--;
-                Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
-                PRINTF("[AUTO] Duty: %u%%\r\n", (unsigned int)s_autoDuty);
             }
             else
             {
                 s_autoAscending = true;
-                s_isHolding = true;
-                s_holdStartTime = now;
-                PRINTF("[AUTO] Duty: 0%% (Apagado completo - retencion 1.5s)\r\n");
+                s_autoDuty++;
             }
         }
+
+        Hardware_PwmApply(s_autoDuty, s_pwmFrequency);
     }
 }
 
@@ -375,39 +394,81 @@ static void Task_StatusLed(uint32_t now)
 
 static void ProcessButton(uint32_t now)
 {
-    static uint8_t s_validatedLevel = 1U;
-    static uint8_t s_sampleLevel = 1U;
-    static uint32_t s_lastLevelChangeTime = 0U;
-    static uint32_t s_pressStartTime = 0U;
-    static bool s_isPressed = false;
-    static bool s_longPressExecuted = false;
+    static button_fsm_state_t s_btnState = BTN_STATE_IDLE;
+    static uint32_t s_debounceStartTime = 0U;
+    static uint32_t s_pressStartTime    = 0U;
+    static bool     s_longPressExecuted = false;
 
+    /* Leer nivel físico de los pulsadores de usuario (activos-bajos con pull-up) */
     uint32_t sw3 = GPIO_PinRead(APP_BTN_SW3_GPIO, APP_BTN_SW3_PIN);
     uint32_t sw2 = GPIO_PinRead(APP_BTN_SW2_GPIO, APP_BTN_SW2_PIN);
     uint8_t currentPin = (sw3 == 0U || sw2 == 0U) ? 0U : 1U;
 
-    if (currentPin != s_sampleLevel)
-    {
-        s_sampleLevel = currentPin;
-        s_lastLevelChangeTime = now;
-    }
+    uint32_t edgeDetected = TakeButtonEdge();
 
-    if ((s_validatedLevel != s_sampleLevel) && ((uint32_t)(now - s_lastLevelChangeTime) >= DEBOUNCE_TIME_MS))
+    switch (s_btnState)
     {
-        s_validatedLevel = s_sampleLevel;
+        case BTN_STATE_IDLE:
+            if (edgeDetected != 0U)
+            {
+                if (currentPin == 0U)
+                {
+                    s_debounceStartTime = now;
+                    s_btnState = BTN_STATE_DEBOUNCE_PRESS;
+                }
+            }
+            break;
 
-        if (s_validatedLevel == 0U)
-        {
-            s_isPressed = true;
-            s_pressStartTime = now;
-            s_longPressExecuted = false;
-        }
-        else
-        {
-            if (s_isPressed)
+        case BTN_STATE_DEBOUNCE_PRESS:
+            if (currentPin != 0U)
+            {
+                s_btnState = BTN_STATE_IDLE;
+            }
+            else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
+            {
+                s_pressStartTime = now;
+                s_longPressExecuted = false;
+                s_btnState = BTN_STATE_PRESSED;
+            }
+            break;
+
+        case BTN_STATE_PRESSED:
+            if (!s_longPressExecuted && ((uint32_t)(now - s_pressStartTime) >= LONG_PRESS_TIME_MS))
+            {
+                s_longPressExecuted = true;
+                s_longPressCount++;
+
+                if (s_currentState == STATE_PAUSE)
+                {
+                    FSM_ResumeFromPause();
+                    PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1.5 s) -> REANUDADO desde PAUSA\r\n");
+                }
+                else
+                {
+                    FSM_TransitionTo(STATE_PAUSE);
+                    PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1.5 s) -> Modo PAUSA (PWM apagado)\r\n");
+                }
+            }
+
+            if (edgeDetected != 0U || currentPin != 0U)
+            {
+                if (currentPin != 0U)
+                {
+                    s_debounceStartTime = now;
+                    s_btnState = BTN_STATE_DEBOUNCE_RELEASE;
+                }
+            }
+            break;
+
+        case BTN_STATE_DEBOUNCE_RELEASE:
+            if (currentPin == 0U)
+            {
+                s_btnState = BTN_STATE_PRESSED;
+            }
+            else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
             {
                 uint32_t pressDuration = (uint32_t)(now - s_pressStartTime);
-                s_isPressed = false;
+                s_btnState = BTN_STATE_IDLE;
 
                 if (!s_longPressExecuted && (pressDuration >= DEBOUNCE_TIME_MS) && (pressDuration < LONG_PRESS_TIME_MS))
                 {
@@ -421,40 +482,16 @@ static void ProcessButton(uint32_t now)
                     else if (s_currentState == STATE_AUTO)
                     {
                         FSM_TransitionTo(STATE_MANUAL);
-                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo MANUAL (Duty: %u%%)\r\n",
-                               (unsigned int)pressDuration, (unsigned int)s_manualDuty);
-                    }
-                    else
-                    {
-                        PRINTF("\r\n>>> [BOTON] Pulsacion corta ignorada en modo PAUSA\r\n");
+                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo MANUAL\r\n", (unsigned int)pressDuration);
                     }
                 }
             }
-        }
+            break;
+
+        default:
+            s_btnState = BTN_STATE_IDLE;
+            break;
     }
-
-    if (s_isPressed && !s_longPressExecuted)
-    {
-        if ((uint32_t)(now - s_pressStartTime) >= LONG_PRESS_TIME_MS)
-        {
-            s_longPressExecuted = true;
-            s_longPressCount++;
-
-            if (s_currentState == STATE_PAUSE)
-            {
-                FSM_ResumeFromPause();
-                PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1500 ms) -> REANUDADO a modo %s\r\n",
-                       (s_currentState == STATE_AUTO) ? "AUTO" : "MANUAL");
-            }
-            else
-            {
-                FSM_TransitionTo(STATE_PAUSE);
-                PRINTF("\r\n>>> [BOTON] Pulsacion larga (>= 1500 ms) -> Modo PAUSA (PWM apagado)\r\n");
-            }
-        }
-    }
-
-    (void)TakeButtonEdge();
 }
 
 static bool ParseUnsignedNumber(const char *str, uint32_t *valOut)
@@ -784,14 +821,21 @@ int main(void)
     PRINTF(" Ingrese 'HELP' para ver la lista de comandos.\r\n");
     PRINTF("====================================================\r\n\r\n");
 
+    uint32_t lastService = g_ms;
+
     while (1)
     {
         uint32_t now = g_ms;
 
-        Task_StatusLed(now);
-        Task_AutoRamp(now);
-        ProcessButton(now);
-        ProcessTelemetry(now);
+        if ((uint32_t)(now - lastService) >= 1U)
+        {
+            lastService = now;
+
+            Task_StatusLed(now);
+            Task_AutoRamp(now);
+            ProcessButton(now);
+            ProcessTelemetry(now);
+        }
 
         ProcessUartRx();
     }
