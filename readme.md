@@ -10,7 +10,7 @@
 
 ## Video Demostrativo
 Enlace al video de demostración en hardware real (funcionamiento de FSM, pulsadores, PWM y consola UART):
-**[https://youtu.be/Acjf7f-tuv8](https://youtu.be/Acjf7f-tuv8)**
+**[https://youtu.be/GPbEvLM_YMU](https://youtu.be/GPbEvLM_YMU)**
 
 ---
 
@@ -213,10 +213,12 @@ $$\text{MR3} = \frac{12\,000\,000}{f} - 1, \quad \text{MR2} = \frac{\text{MR3} \
 *Resultado:* La coincidencia de ciclos de reloj enteros arroja un error teórico de **0.00%**, superando estrictamente el criterio de tolerancia de $\pm 2.0\%$.
 
 ### 9.2. Evidencias en Video Demostrativo:
-En el video publicado ([https://youtu.be/Acjf7f-tuv8](https://youtu.be/Acjf7f-tuv8)) se aprecian las siguientes evidencias físicas:
-* **0:30 – 1:10:** Verificación del brillo al 25%, 50% y 75% en modo MANUAL mediante pulsador y comandos serie `DUTY`.
-* **1:15 – 2:00:** Demostración de rampa continua en modo AUTO subiendo de 10% a 90% y descendiendo de 90% a 10% en exactamente 3.2 segundos.
-* **2:05 – 2:45:** Entrada a PAUSA forzando PWM al 0.0% continuo (apagado total sin pulsos residuales) y reanudación con `RESUME`.
+En el video publicado ([https://youtu.be/GPbEvLM_YMU](https://youtu.be/GPbEvLM_YMU)) se aprecian las siguientes evidencias físicas:
+* Demostración completa de los 3 modos de la máquina de estados (`MANUAL`, `AUTO`, `PAUSA`).
+* Verificación de duty y frecuencia PWM con comandos `DUTY` y `FREQ`.
+* Comportamiento determinista de la rampa continua en modo AUTO (10% a 90% a 10% en 3.2 s).
+* Discriminación de pulsaciones cortas y largas sin rebotes espurios en pulsadores físicos SW2/SW3.
+* Validación sintáctica y robustez de la consola UART ante comandos inválidos, desbordamiento y terminadores `\r`, `\n` y `\r\n`.
 
 ---
 
@@ -243,4 +245,34 @@ En cumplimiento con el requisito del mandato (Pág. 8): *«Identifique el códig
    * **Consola y Protocolo de Comandos Seriales:** Analizador sintáctico tolerante a CR, LF y CRLF, búfer circular de 128 bytes alimentado por interrupción `LPUART0_IRQHandler`, validación carácter por carácter de enteros en `ParseUnsignedNumber` y emisión periódica de telemetría sin bloqueo.
    * **FSM de Antirrebote Disparada por Eventos:** Máquina de 4 estados para pulsadores que consume atómicamente la bandera de la ISR (`TakeButtonEdge()`), realiza validación de 30 ms en pulsación y liberación, y discrimina pulsación corta y larga contabilizando únicamente eventos aceptados.
 2. **Desactivación de SysTick en [`peripherals.c`](file:///C:/Users/jorge/Documents/Jorge/MCXA156/PrimerParcial/Microcontrolares%20Primer%20Parcial/led_blinky/peripherals.c):** Anulación del temporizador de sistema para garantizar que el tick del proyecto provenga al 100% del temporizador periférico `CTIMER0`.
+
+---
+
+## 11. Memoria de la Prueba Inyectada de Desbordamiento Temporal (UINT32_MAX)
+
+El mandato oficial (Pág. 7) establece como prueba de aceptación:
+> *«Tiempo cerca de UINT32_MAX: Temporización continúa al desbordar; prueba inyectada documentada.»*
+
+### 11.1. Justificación de la Prueba Inyectada:
+Un contador de milisegundos de 32 bits sin signo (`uint32_t g_ms`) con tick a $1\text{ kHz}$ alcanza su valor máximo en:
+$$T_{\text{max}} = \frac{2^{32} - 1}{1000\text{ s}^{-1}} = 4\,294\,967.295\text{ s} \approx 49.71\text{ días}$$
+Dado que es inviable esperar 49.7 días en un entorno de laboratorio o video de aceptación, el estándar de aseguramiento de software embebido exige validar el desbordamiento (*rollover*) mediante una **prueba inyectada**.
+
+### 11.2. Demostración Formal en Aritmética Modular de 32 Bits:
+En el estándar C99/C11 sobre la arquitectura ARM Cortex-M33, las operaciones entre enteros sin signo `uint32_t` están estrictamente definidas en módulo $2^{32}$:
+
+* **Escenario Inyectado:**
+  * Supongamos que una tarea periódica (ej. actualización de rampa con `AUTO_STEP_INTERVAL_MS = 20U`) registra su última ejecución en `s_lastAutoStepMs = 4\,294\,967\,285` (`0xFFFFFFF5`).
+  * Faltan $10\text{ ms}$ para alcanzar `UINT32_MAX` (`0xFFFFFFFF`).
+  * Tras transcurrir $20\text{ ms}$ físicos, el contador da la vuelta (*rollover*) a cero y alcanza `now = 5` (`0x00000005`).
+
+* **Evaluación del código implementado:**
+  $$\Delta t = (\text{uint32\_t})(\text{now} - \text{s\_lastAutoStepMs})$$
+  $$\Delta t = (5 - 4\,294\,967\,285) \pmod{2^{32}} = (-4\,294\,967\,280) \pmod{2^{32}} = \mathbf{20\text{ U}}$$
+
+* **Resultado:**
+  Como $\Delta t = 20 \ge 20$, la condición de temporización se evalúa como `true`, el paso de la rampa se ejecuta exactamente a tiempo y la variable de control se actualiza con `s_lastAutoStepMs = 5`.
+
+### 11.3. Robustez Arquitectónica del Firmware:
+En ningún punto del código base se utiliza la comparación errónea `if (now >= nextTime)`. Todas las tareas concurrentes (`Task_AutoRamp`, `Task_StatusLed`, `ProcessButton`, `ProcessTelemetry`) implementan exclusivamente la fórmula de resta sin signo `(uint32_t)(now - lastTime) >= interval`, garantizando matemáticamente inmunidad absoluta e indefinida ante desbordamientos temporales.
 
