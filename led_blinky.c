@@ -424,11 +424,19 @@ static void ProcessButton(uint32_t now)
             {
                 s_btnState = BTN_STATE_IDLE;
             }
-            else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
+            else
             {
-                s_pressStartTime = now;
-                s_longPressExecuted = false;
-                s_btnState = BTN_STATE_PRESSED;
+                /* Si ocurre un nuevo flanco mientras permanece en bajo, reiniciar ventana de 30 ms */
+                if (edgeDetected != 0U)
+                {
+                    s_debounceStartTime = now;
+                }
+                else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
+                {
+                    s_pressStartTime = now;
+                    s_longPressExecuted = false;
+                    s_btnState = BTN_STATE_PRESSED;
+                }
             }
             break;
 
@@ -465,24 +473,35 @@ static void ProcessButton(uint32_t now)
             {
                 s_btnState = BTN_STATE_PRESSED;
             }
-            else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
+            else
             {
-                uint32_t pressDuration = (uint32_t)(now - s_pressStartTime);
-                s_btnState = BTN_STATE_IDLE;
-
-                if (!s_longPressExecuted && (pressDuration >= DEBOUNCE_TIME_MS) && (pressDuration < LONG_PRESS_TIME_MS))
+                if (edgeDetected != 0U)
                 {
-                    s_shortPressCount++;
+                    s_debounceStartTime = now;
+                }
+                else if ((uint32_t)(now - s_debounceStartTime) >= DEBOUNCE_TIME_MS)
+                {
+                    uint32_t pressDuration = (uint32_t)(now - s_pressStartTime);
+                    s_btnState = BTN_STATE_IDLE;
 
-                    if (s_currentState == STATE_MANUAL)
+                    if (!s_longPressExecuted && (pressDuration >= DEBOUNCE_TIME_MS) && (pressDuration < LONG_PRESS_TIME_MS))
                     {
-                        FSM_TransitionTo(STATE_AUTO);
-                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo AUTO\r\n", (unsigned int)pressDuration);
-                    }
-                    else if (s_currentState == STATE_AUTO)
-                    {
-                        FSM_TransitionTo(STATE_MANUAL);
-                        PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo MANUAL\r\n", (unsigned int)pressDuration);
+                        if (s_currentState == STATE_MANUAL)
+                        {
+                            s_shortPressCount++;
+                            FSM_TransitionTo(STATE_AUTO);
+                            PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo AUTO\r\n", (unsigned int)pressDuration);
+                        }
+                        else if (s_currentState == STATE_AUTO)
+                        {
+                            s_shortPressCount++;
+                            FSM_TransitionTo(STATE_MANUAL);
+                            PRINTF("\r\n>>> [BOTON] Pulsacion corta (%u ms) -> Modo MANUAL\r\n", (unsigned int)pressDuration);
+                        }
+                        else
+                        {
+                            PRINTF("\r\n>>> [BOTON] Pulsacion corta ignorada en modo PAUSA\r\n");
+                        }
                     }
                 }
             }
